@@ -1,21 +1,26 @@
 const API_URL = "https://script.google.com/macros/s/AKfycbykTybIX-9YVGytTKeCBbDdpU9ihP3lbYFaAEBJQA0iE7uaPpI7Te1U568pZdTian_-mw/exec"; // REPLACE THIS
 const DB_NAME = "Hotel_POS";
-const DB_VERSION = 1; 
+const DB_VERSION = 2; 
 let db;
 
 let antreans = [
-    { cart: [], profile: null, isLocked: true, phoneInput: "", nameInput: "" },
-    { cart: [], profile: null, isLocked: true, phoneInput: "", nameInput: "" },
-    { cart: [], profile: null, isLocked: true, phoneInput: "", nameInput: "" }
+    { cart: [], room: "", isLocked: true },
+    { cart: [], room: "", isLocked: true },
+    { cart: [], room: "", isLocked: true }
 ];
 let currentAntreanIndex = 0;
 
 let currentCashier = ""; let currentPin = ""; let currentShiftId = ""; let currentLoginTime = "";
-let globalMenuData = []; let currentCategory = ""; let activeLaundryTickets = []; let currentCart = []; 
+let globalMenuData = []; let currentLocation = ""; let currentCategory = ""; let activeLaundryTickets = []; let currentCart = []; 
 let activeNumpadItem = null; let numpadValue = "0"; let activeSettlementTicket = null;
 window.masterDrawerBalance = 0; let isLoggingOut = false; let currentVoidTarget = { type: null, id: null };
-let isMenuLocked = true; let isSyncing = false; let activeCustomerProfile = null;
+let isMenuLocked = true; let isSyncing = false;
 window.enableDrawerTracking = true;
+
+window.globalRoomList = [];
+window.globalRecentOrders = [];
+window.globalRecentExpenses = [];
+window.globalRecentShifts = [];
 
 let btDevice = null; let btCharacteristic = null;
 window.lastActivityWrite = Date.now();
@@ -34,8 +39,6 @@ function initDB() {
             if (!db.objectStoreNames.contains("cash_drops")) db.createObjectStore("cash_drops", { keyPath: "dropId" }); 
             if (!db.objectStoreNames.contains("shift_reports")) db.createObjectStore("shift_reports", { keyPath: "shiftId" }); 
             if (!db.objectStoreNames.contains("expenses")) db.createObjectStore("expenses", { keyPath: "expenseId" });
-            if (!db.objectStoreNames.contains("members")) db.createObjectStore("members", { keyPath: "phone" });
-            if (!db.objectStoreNames.contains("unsynced_members")) db.createObjectStore("unsynced_members", { keyPath: "phone" });
             if (!db.objectStoreNames.contains("expense_categories")) db.createObjectStore("expense_categories", { keyPath: "name" });
             if (!db.objectStoreNames.contains("void_requests")) db.createObjectStore("void_requests", { keyPath: "id" });
             if (!db.objectStoreNames.contains("local_shift_history")) db.createObjectStore("local_shift_history", { keyPath: "shiftId" });
@@ -90,7 +93,7 @@ window.buildEscPosReceipt = async function(orderId, order, deposit, remaining, p
     let receipt = CMD_INIT + CMD_CENTER + CMD_BOLD_ON + CMD_BIG + h1 + "\n" + CMD_NORMAL + CMD_BOLD_OFF;
     receipt += formatWIB(order.timestamp || new Date().toISOString()) + "\n";
     receipt += "--------------------------------\n" + CMD_LEFT;
-    receipt += "Nota: " + orderId + "\nPlgn: " + order.customerName + "\nKsr : " + order.cashier + "\n--------------------------------\n";
+    receipt += "Nota: " + orderId + "\nKamar: " + order.roomNumber + "\nKsr : " + order.cashier + "\n--------------------------------\n";
 
     order.items.forEach(item => {
         const qtyDisplay = item.qty % 1 !== 0 ? item.qty.toFixed(2) : item.qty;
@@ -168,23 +171,19 @@ window.switchWorkspace = function(type) {
 };
 window.lockScreen = function() { window.location.reload(); };
 
-// 4. ANTREAN, PELANGGAN
+// 4. ANTREAN, PELANGGAN, KAMAR
 window.switchAntrean = function(index) {
     if (currentAntreanIndex === index) return;
     antreans[currentAntreanIndex].cart = [...currentCart];
-    antreans[currentAntreanIndex].profile = activeCustomerProfile ? {...activeCustomerProfile} : null;
     antreans[currentAntreanIndex].isLocked = isMenuLocked;
     
-    let cp = document.getElementById("cust-phone"); if (cp) antreans[currentAntreanIndex].phoneInput = cp.value;
-    let cn = document.getElementById("cust-name"); if (cn) antreans[currentAntreanIndex].nameInput = cn.value;
+    let ri = document.getElementById("room-input"); if (ri) antreans[currentAntreanIndex].room = ri.value;
     
     currentAntreanIndex = index;
     currentCart = [...antreans[currentAntreanIndex].cart]; 
-    activeCustomerProfile = antreans[currentAntreanIndex].profile ? {...antreans[currentAntreanIndex].profile} : null;
     isMenuLocked = antreans[currentAntreanIndex].isLocked;
     
-    if (cp) cp.value = antreans[currentAntreanIndex].phoneInput;
-    if (cn) cn.value = antreans[currentAntreanIndex].nameInput;
+    if (ri) ri.value = antreans[currentAntreanIndex].room;
 
     document.querySelectorAll(".antrean-btn").forEach((btn, i) => {
         if (i === index) { btn.classList.add("active"); btn.style.background = "#fff"; btn.style.color = "#2980b9"; } 
@@ -200,8 +199,8 @@ window.switchAntrean = function(index) {
         if (acb) acb.classList.add("hidden");
         if (gl) { gl.style.opacity = "1"; gl.style.pointerEvents = "auto"; }
     } else {
-        let pName = activeCustomerProfile ? activeCustomerProfile.name : ((cn ? cn.value : "") || "Walk-in");
-        let acn = document.getElementById("active-cust-name"); if (acn) acn.innerText = pName;
+        let roomDisp = antreans[currentAntreanIndex].room || "Tanpa Kamar";
+        let acn = document.getElementById("active-room-display"); if (acn) acn.innerText = roomDisp;
         if (cis) cis.classList.add("hidden");
         if (acb) acb.classList.remove("hidden");
         if (gl) { gl.style.opacity = "0"; gl.style.pointerEvents = "none"; }
@@ -210,80 +209,75 @@ window.switchAntrean = function(index) {
 };
 
 window.lockMenu = function() {
-    isMenuLocked = true; activeCustomerProfile = null; 
+    isMenuLocked = true; 
     let pf = document.getElementById("pay-free"); if (pf) { if(pf.tagName === 'INPUT') pf.value = 0; else pf.innerText = 0; }
     let cis = document.getElementById("customer-input-section"); if(cis) cis.classList.remove("hidden");
     let acb = document.getElementById("active-customer-banner"); if(acb) acb.classList.add("hidden");
     let gl = document.getElementById("glass-overlay"); if(gl) { gl.style.opacity = "1"; gl.style.pointerEvents = "auto"; }
-    let cp = document.getElementById("cust-phone"); if(cp) cp.value = ""; 
-    let cn = document.getElementById("cust-name"); if(cn) cn.value = "";
+    let ri = document.getElementById("room-input"); if(ri) ri.value = ""; 
     
     currentCart = []; 
-    antreans[currentAntreanIndex] = { cart: [], profile: null, isLocked: true, phoneInput: "", nameInput: ""};
+    antreans[currentAntreanIndex] = { cart: [], room: "", isLocked: true };
     window.renderCart();
 };
 
-function proceedToUnlock(phone, name) {
-    let acn = document.getElementById("active-cust-name"); if(acn) acn.innerText = name; 
-    let acp = document.getElementById("active-cust-phone"); if(acp) acp.innerText = (phone !== "-" && !phone.startsWith("999")) ? `(${phone})` : "";
+function proceedToUnlock(room) {
+    let acn = document.getElementById("active-room-display"); if(acn) acn.innerText = room; 
     let cis = document.getElementById("customer-input-section"); if(cis) cis.classList.add("hidden");
     let acb = document.getElementById("active-customer-banner"); if(acb) acb.classList.remove("hidden");
+    
     isMenuLocked = false; 
     let gl = document.getElementById("glass-overlay"); 
     if(gl) { gl.style.opacity = "0"; setTimeout(() => { gl.style.pointerEvents = "none"; }, 300); }
+    
     antreans[currentAntreanIndex].isLocked = false; 
-    antreans[currentAntreanIndex].phoneInput = phone; antreans[currentAntreanIndex].nameInput = name; 
-    antreans[currentAntreanIndex].profile = activeCustomerProfile ? {...activeCustomerProfile} : null;
+    antreans[currentAntreanIndex].room = room; 
     window.renderCart();
 }
 
 window.unlockMenu = function(isGuest) {
-    let phone = "-"; let name = "Walk-in";
-    let cp = document.getElementById("cust-phone"); let cn = document.getElementById("cust-name");
+    let room = "Tanpa Kamar";
+    let ri = document.getElementById("room-input");
+    
     if (isGuest) { 
-        if(cp) cp.value = ""; if(cn) cn.value = "Walk-in"; activeCustomerProfile = null; 
-        proceedToUnlock(phone, name);
+        if(ri) ri.value = "";
+        proceedToUnlock(room);
     } else { 
-        phone = cp ? cp.value.trim() : ""; name = (cn ? cn.value.trim() : "") || "Pelanggan"; 
-        activeCustomerProfile = { phone: phone, name: name };
-        proceedToUnlock(phone, name);
+        room = ri ? ri.value.trim() : "";
+        if (!room) return alert("Silakan ketik atau pilih nomor kamar terlebih dahulu.");
+        proceedToUnlock(room);
     }
 };
 
 window.handleAutocomplete = function(e) {
-    if(!db) return;
     const val = e.target ? e.target.value.toLowerCase().trim() : ""; 
     const resBox = document.getElementById("autocomplete-results");
     if (!resBox) return;
-    db.transaction(["members"], "readonly").objectStore("members").getAll().onsuccess = (ev) => {
-        let matches = ev.target.result; 
-        if (val.length > 0) matches = matches.filter(m => String(m.phone).toLowerCase().includes(val) || String(m.name).toLowerCase().includes(val));
-        if (matches.length > 0) {
-            resBox.innerHTML = matches.map(m => `
-                <div class="autocomplete-item" onmousedown="window.selectMember('${m.phone}')" style="padding: 12px 15px; border-bottom: 1px solid #eef2f3; cursor: pointer; text-align: left; background: #fff; font-size: 15px; z-index: 10000; position:relative;">
-                    <div style="font-weight: bold; color: #2980b9;">${m.phone}</div>
-                    <div style="font-size: 13px; color: #555; margin-top:2px;">${m.name}</div>
-                </div>`).join("");
-            resBox.classList.remove("hidden"); resBox.style.display = "block";
-        } else { resBox.classList.add("hidden"); resBox.style.display = "none"; }
-    };
+
+    if (val.length === 0) {
+        resBox.classList.add("hidden"); resBox.style.display = "none";
+        return;
+    }
+
+    let matches = window.globalRoomList.filter(r => r.toLowerCase().includes(val));
+    
+    if (matches.length > 0) {
+        resBox.innerHTML = matches.map(r => `
+            <div class="autocomplete-item" onmousedown="window.selectRoom('${r}')" style="padding: 12px 15px; border-bottom: 1px solid #eef2f3; cursor: pointer; text-align: left; background: #fff; font-size: 15px; z-index: 10000; position:relative;">
+                <div style="font-weight: bold; color: #2980b9;">🚪 Kamar ${r}</div>
+            </div>`).join("");
+        resBox.classList.remove("hidden"); resBox.style.display = "block";
+    } else { 
+        resBox.classList.add("hidden"); resBox.style.display = "none"; 
+    }
 };
 
-window.selectMember = function(phone) {
-    db.transaction(["members"], "readonly").objectStore("members").get(phone).onsuccess = (e) => {
-        activeCustomerProfile = e.target.result;
-        if(activeCustomerProfile) {
-            let cp = document.getElementById("cust-phone"); if(cp) cp.value = activeCustomerProfile.phone;
-            let cn = document.getElementById("cust-name"); if(cn) cn.value = activeCustomerProfile.name;
-            let rb = document.getElementById("autocomplete-results"); if(rb) { rb.classList.add("hidden"); rb.style.display = "none"; }
-        }
-    };
+window.selectRoom = function(room) {
+    let ri = document.getElementById("room-input"); if(ri) ri.value = room;
+    let rb = document.getElementById("autocomplete-results"); if(rb) { rb.classList.add("hidden"); rb.style.display = "none"; }
 };
 
 // 5. MENU & NUMPAD & TRANSAKSI (CART)
-let currentLocation = ""; // Add this to your globals at the top
-
-// Replace the existing loadMenuUI and renderProductGrid with this:
 function loadMenuUI() {
     // 1. Setup Location (Layer 1)
     const locations = [...new Set(globalMenuData.map(i => i.location))]; 
@@ -295,7 +289,6 @@ function loadMenuUI() {
         locations.forEach(loc => {
             const btn = document.createElement("button"); 
             btn.className = `cat-btn ${loc === currentLocation ? "active" : ""}`; 
-            // Give location tabs a different visual style (optional)
             if(loc === currentLocation) {
                 btn.style.background = "#fff";
                 btn.style.color = "#2c3e50";
@@ -306,16 +299,15 @@ function loadMenuUI() {
             btn.innerText = loc;
             btn.onclick = () => { 
                 currentLocation = loc; 
-                // Reset category to the first one available in this new location
                 const availableCats = [...new Set(globalMenuData.filter(i => i.location === currentLocation).map(i => i.category))];
                 currentCategory = availableCats[0];
-                loadMenuUI(); // Re-render both layers
+                loadMenuUI();
             };
             locContainer.appendChild(btn);
         });
     }
 
-    // 2. Setup Category (Layer 2) - Filtered by Location
+    // 2. Setup Category (Layer 2)
     const filteredByLoc = globalMenuData.filter(i => i.location === currentLocation);
     const categories = [...new Set(filteredByLoc.map(i => i.category))]; 
     if (!currentCategory || !categories.includes(currentCategory)) currentCategory = categories[0];
@@ -342,16 +334,10 @@ function loadMenuUI() {
 function renderProductGrid() {
     const grid = document.getElementById("product-grid"); if(!grid) return;
     grid.innerHTML = "";
-    // Filter by BOTH Location and Category
     globalMenuData.filter(i => i.location === currentLocation && i.category === currentCategory).forEach(item => {
         const card = document.createElement("div"); card.className = "product-card";
         card.innerHTML = `<div><h4>${item.name}</h4></div><div class="price-badge">Rp ${item.price.toLocaleString('id-ID')}</div>`;
-        card.onclick = () => { 
-            if(!isMenuLocked) { 
-                if(item.inputMode === "DECIMAL") window.openNumpad(item); 
-                else window.addToCart(item, 1); 
-            } 
-        };
+        card.onclick = () => { if(!isMenuLocked) { if(item.inputMode === "DECIMAL") window.openNumpad(item); else window.addToCart(item, 1); } };
         grid.appendChild(card);
     });
 }
@@ -446,14 +432,12 @@ window.finalizeOrder = async function(shouldPrint) {
     
     if ((window.cartGrandTotal - (cash + qris + transfer)) > 0) return alert("⚠️ Pembayaran Belum Cukup!");
 
-    let cp = document.getElementById("cust-phone"); let custPhone = cp ? cp.value.trim() : "-"; if(!custPhone) custPhone = "-";
-    let cn = document.getElementById("cust-name"); let custName = cn ? cn.value.trim() : "Walk-in"; if(!custName) custName = "Walk-in";
-
-    let finalStatus = "Completed"; // Simplified for Hotel POS without Laundry processing
+    let roomNumber = antreans[currentAntreanIndex].room || "Tanpa Kamar";
+    let finalStatus = "Completed"; 
 
     const orderPayload = {
         orderId: "ORD-" + Date.now(), timestamp: new Date().toISOString(), cashier: currentCashier, shiftId: currentShiftId,
-        customerName: custName, customerPhone: custPhone, orderStatus: finalStatus, items: currentCart, subtotal: window.cartSubtotal, discounts: free, grandTotal: window.cartGrandTotal,
+        roomNumber: roomNumber, orderStatus: finalStatus, items: currentCart, subtotal: window.cartSubtotal, discounts: free, grandTotal: window.cartGrandTotal,
         paymentMethod: "Split", cashAmount: cash, qrisAmount: qris, transferAmount: transfer, freeAmount: free, syncStatus: "Pending" 
     };
 
@@ -476,7 +460,7 @@ window.renderActiveTickets = function() {
         let receiptText = ticket.items.map(i => `${i.qty % 1 !== 0 ? i.qty.toFixed(2) : i.qty}x ${i.name}`).join('\n');
         
         let buttonsHtml = `<button class="ticket-btn" style="background:#2ecc71;" onclick="window.openSettlement('${ticket.orderId}', ${remaining})">Pelunasan Tagihan</button>`;
-        grid.innerHTML += `<div class="ticket-card"><div class="ticket-header"><span>${ticket.customerName}</span> <span style="color:#7f8c8d; font-size:12px;">${ticket.orderId}</span></div><div style="font-size:14px; margin-bottom:10px; white-space:pre-wrap;">${receiptText}</div><div style="display:flex; justify-content:space-between; font-size:14px; margin-bottom:10px; border-top:1px dashed #ddd; padding-top:5px;"><span>Tagihan Sisa:</span> <strong style="color:#e74c3c;">Rp ${remaining.toLocaleString('id-ID')}</strong></div>${buttonsHtml}</div>`;
+        grid.innerHTML += `<div class="ticket-card"><div class="ticket-header"><span>Kamar: ${ticket.roomNumber}</span> <span style="color:#7f8c8d; font-size:12px;">${ticket.orderId}</span></div><div style="font-size:14px; margin-bottom:10px; white-space:pre-wrap;">${receiptText}</div><div style="display:flex; justify-content:space-between; font-size:14px; margin-bottom:10px; border-top:1px dashed #ddd; padding-top:5px;"><span>Tagihan Sisa:</span> <strong style="color:#e74c3c;">Rp ${remaining.toLocaleString('id-ID')}</strong></div>${buttonsHtml}</div>`;
     });
 };
 
@@ -519,24 +503,38 @@ window.saveExpense = function() {
 
 window.openHistoryModal = function() { document.getElementById("history-modal").classList.remove("hidden"); window.renderHistoryList('orders'); };
 window.renderHistoryList = function(type) {
-    const container = document.getElementById("history-container"); if(!container) return;
+    const container = document.getElementById("history-container"); 
+    if(!container) return;
     container.innerHTML = "";
+    
     if (type === 'orders') {
-        db.transaction(["orders"], "readonly").objectStore("orders").getAll().onsuccess = (e) => {
-            const shiftOrders = e.target.result.filter(o => o.shiftId === currentShiftId).reverse();
-            shiftOrders.forEach(o => {
-                let badge = `<span class="status-badge status-paid">${o.orderStatus}</span>`;
-                container.innerHTML += `<div class="history-row"><div><strong>${o.customerName}</strong><br><small style="color:#7f8c8d;">${formatTimeOnlyWIB(o.timestamp)} | Rp ${o.grandTotal.toLocaleString('id-ID')}</small></div><div style="display:flex; align-items:center; gap:8px;">${badge}</div></div>`;
-            });
-        };
+        const ordersToDisplay = window.globalRecentOrders || [];
+        if(ordersToDisplay.length === 0) return container.innerHTML = `<div style="padding:20px; text-align:center;">Belum ada histori order di server.</div>`;
+        
+        ordersToDisplay.forEach(o => {
+            let badge = o.orderStatus === "Voided" ? `<span class="status-badge status-voided">Dibatalkan</span>` : `<span class="status-badge status-paid">${o.orderStatus}</span>`;
+            container.innerHTML += `<div class="history-row"><div><strong>Kamar: ${o.roomNumber}</strong><br><small style="color:#7f8c8d;">${formatTimeOnlyWIB(o.timestamp)} | Rp ${o.grandTotal.toLocaleString('id-ID')} | Kasir: ${o.cashier}</small></div><div style="display:flex; align-items:center; gap:8px;">${badge}</div></div>`;
+        });
+        
     } else if (type === 'expenses') {
-        db.transaction(["expenses"], "readonly").objectStore("expenses").getAll().onsuccess = (e) => {
-            const shiftExpenses = e.target.result.filter(exp => exp.shiftId === currentShiftId).reverse();
-            shiftExpenses.forEach(exp => {
-                let badge = `<span class="status-badge status-paid">Aktif</span>`;
-                container.innerHTML += `<div class="history-row"><div><strong>${exp.category}</strong><br><small style="color:#7f8c8d;">${formatTimeOnlyWIB(exp.timestamp)} | Rp ${exp.amount.toLocaleString('id-ID')}</small><br><small>${exp.description}</small></div><div style="display:flex; align-items:center; gap:10px;">${badge}</div></div>`;
-            });
-        };
+        const expensesToDisplay = window.globalRecentExpenses || [];
+        if(expensesToDisplay.length === 0) return container.innerHTML = `<div style="padding:20px; text-align:center;">Belum ada pengeluaran dicatat di server.</div>`;
+        
+        expensesToDisplay.forEach(exp => {
+            let badge = exp.status === "Voided" ? `<span class="status-badge status-voided">Dibatalkan</span>` : `<span class="status-badge status-paid">Aktif</span>`;
+            container.innerHTML += `<div class="history-row"><div><strong>${exp.category}</strong><br><small style="color:#7f8c8d;">${formatTimeOnlyWIB(exp.timestamp)} | Rp ${exp.amount.toLocaleString('id-ID')} | Kasir: ${exp.cashier}</small><br><small>${exp.description}</small></div><div style="display:flex; align-items:center; gap:10px;">${badge}</div></div>`;
+        });
+        
+    } else if (type === 'shifts') {
+        const shiftsToDisplay = window.globalRecentShifts || [];
+        if(shiftsToDisplay.length === 0) { 
+            container.innerHTML = `<div style="padding:20px; text-align:center;">Belum ada histori shift di sistem server.</div>`; 
+            return; 
+        }
+        
+        shiftsToDisplay.slice(0, 20).forEach(s => {
+            container.innerHTML += `<div class="history-row" style="align-items:flex-start;"><div><strong>Shift: ${s.shiftId}</strong><br><small style="color:#7f8c8d;">Kasir: ${s.cashier} | Keluar: ${formatWIB(s.logoutTime)}</small></div><div style="display:flex; text-align:right; align-items:center;"><div><strong style="margin-right:15px;">Omset: Rp ${(s.totalOmset || 0).toLocaleString('id-ID')}</strong></div></div></div>`;
+        });
     }
 };
 
@@ -553,13 +551,19 @@ window.syncMasterData = async function(forceAwait = false) {
     let nTxt = document.getElementById("network-text"); let nDot = document.getElementById("network-dot");
     if (!navigator.onLine) { if(nTxt) nTxt.innerText = "Mode Offline"; if(nDot) nDot.style.backgroundColor = "#e74c3c"; return; }
     try {
-            // The bulletproof way to fetch from GAS
-        const response = await fetch(`${API_URL}?t=${Date.now()}`, { method: 'GET' });
+        const response = await fetch(`${API_URL}?t=${Date.now()}`, { method: 'GET' }); 
         if (!response.ok) throw new Error("Network response was not ok");
         const result = await response.json();
         
         if (result.status === "Success") {
             window.masterDrawerBalance = result.masterDrawerBalance || 0;
+            window.globalRecentOrders = result.data.recentOrders || [];
+            window.globalRecentExpenses = result.data.recentExpenses || [];
+            window.globalRecentShifts = result.recentShifts || [];
+            
+            // Parse Room List
+            window.globalRoomList = (result.data.settings["Room_List"] || "").split(",").map(r => r.trim()).filter(r => r);
+
             let p1 = new Promise((resolve) => {
                 let txFast = db.transaction(["staff", "menu"], "readwrite");
                 txFast.objectStore("staff").clear(); result.data.staff.forEach(s => txFast.objectStore("staff").add(s));
@@ -584,8 +588,8 @@ window.runBackgroundSync = async function() {
         for (const order of orders) {
             if (order.syncStatus === "Pending") {
                 try {
-                    let r = await fetch(API_URL, { method: 'POST', mode: 'cors', body: JSON.stringify({ action: "syncOrder", data: order }) });
-                    if ((await r.json()).status === "Success") { order.syncStatus = "Synced"; db.transaction(["orders"], "readwrite").objectStore("orders").put(order); }
+                    let r = await fetch(API_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: "syncOrder", data: order }) });
+                    order.syncStatus = "Synced"; db.transaction(["orders"], "readwrite").objectStore("orders").put(order); 
                 } catch(e) {}
             }
         }
@@ -593,16 +597,16 @@ window.runBackgroundSync = async function() {
         for (const exp of expenses) {
             if (exp.syncStatus === "Pending") {
                 try {
-                    let r = await fetch(API_URL, { method: 'POST', mode: 'cors', body: JSON.stringify({ action: "syncExpense", data: exp }) });
-                    if ((await r.json()).status === "Success") { exp.syncStatus = "Synced"; db.transaction(["expenses"], "readwrite").objectStore("expenses").put(exp); }
+                    let r = await fetch(API_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: "syncExpense", data: exp }) });
+                    exp.syncStatus = "Synced"; db.transaction(["expenses"], "readwrite").objectStore("expenses").put(exp); 
                 } catch(e) {}
             }
         }
         let cashDrops = await new Promise(res => db.transaction(["cash_drops"], "readonly").objectStore("cash_drops").getAll().onsuccess = e => res(e.target.result));
         for (const drop of cashDrops) {
             try {
-                let r = await fetch(API_URL, { method: 'POST', mode: 'cors', body: JSON.stringify({ action: "syncCashDrop", data: drop }) });
-                if ((await r.json()).status === "Success") db.transaction(["cash_drops"], "readwrite").objectStore("cash_drops").delete(drop.dropId);
+                let r = await fetch(API_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ action: "syncCashDrop", data: drop }) });
+                db.transaction(["cash_drops"], "readwrite").objectStore("cash_drops").delete(drop.dropId);
             } catch(e) {}
         }
     } finally { isSyncing = false; }
@@ -621,7 +625,7 @@ window.openShiftReport = function() {
         let tCust = 0; let tOrders = 0; let tOmset = 0; let tCash = 0; let tQris = 0; let tTransfer = 0; let tFree = 0; let tExpense = 0; let foodSummary = {};
         
         shiftOrders.forEach(o => {
-            tOrders++; if (o.customerPhone && o.customerPhone !== "-") tCust++;
+            tOrders++; if (o.roomNumber && o.roomNumber !== "Tanpa Kamar") tCust++;
             tOmset += o.grandTotal; tCash += (o.cashAmount || 0); tQris += (o.qrisAmount || 0); tTransfer += (o.transferAmount || 0); tFree += (o.freeAmount || 0);
             if (o.items) o.items.forEach(i => { foodSummary[i.name] = (foodSummary[i.name] || 0) + i.qty; });
         });
@@ -672,6 +676,14 @@ window.triggerEndShift = async function() {
 window.onload = async () => { 
     await initDB(); 
     window.syncMasterData(); 
+    
+    document.addEventListener("mousedown", function(e) {
+        let resBox = document.getElementById('autocomplete-results');
+        if (resBox && !e.target.closest('#autocomplete-results') && e.target.id !== 'room-input') { 
+            resBox.classList.add('hidden'); resBox.style.display = "none"; 
+        }
+    });
+
     window.setInterval(window.runBackgroundSync, 5000); 
     window.setInterval(window.syncMasterData, 30000); 
 };
